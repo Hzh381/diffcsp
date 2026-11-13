@@ -1,0 +1,28 @@
+# Tested with Python 3.8.20.
+# PyTorch and PyG binary wheels should be installed from the wheel index
+# matching the local Python and CUDA version. See README.md for commands.
+
+numpy==1.23.5
+pandas==1.5.3
+scikit-learn==1.1.3
+scipy==1.10.1
+
+torch==1.9.0
+torch-geometric==1.7.2
+torch-scatter==2.0.9
+torch-sparse==0.6.12
+pytorch-lightning==1.3.8
+
+hydra-core==1.1.2
+omegaconf==2.1.2
+python-dotenv==1.0.1
+
+pymatgen==2023.8.10
+# pyxtal 0.6+ requires pandas>=2, while matminer 0.9 requires pandas~=1.5.
+pyxtal==0.5.9
+p-tqdm==1.4.2
+tqdm==4.70.1
+matminer==0.9.0
+smact==2.5.1
+chemparse==0.3.2
+e3nn==0.5.1

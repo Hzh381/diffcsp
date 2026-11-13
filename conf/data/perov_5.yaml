@@ -7,7 +7,7 @@ niggli: true
 primitive: false
 graph_method: crystalnn
 lattice_scale_method: scale_length
-preprocess_workers: 30
+preprocess_workers: 1
 readout: mean
 max_atoms: 20
 otf_graph: false

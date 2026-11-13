@@ -1,6 +1,5 @@
 import numpy as np
 import pandas as pd
-import networkx as nx
 import torch
 import copy
 import itertools
@@ -9,8 +8,6 @@ from pymatgen.core.structure import Structure
 from pymatgen.core.lattice import Lattice
 from pymatgen.analysis.graphs import StructureGraph
 from pymatgen.analysis import local_env
-
-from networkx.algorithms.components import is_connected
 
 from sklearn.metrics import accuracy_score, recall_score, precision_score
 
@@ -24,8 +21,6 @@ from pymatgen.symmetry.analyzer import SpacegroupAnalyzer
 from pyxtal.symmetry import Group
 from pyxtal import pyxtal
 
-from pathos.pools import ProcessPool as Pool
-# from multiprocessing import Pool
 from tqdm import tqdm 
 from functools import partial 
 
@@ -1179,16 +1174,24 @@ def preprocess(input_file, num_workers, niggli, primitive, graph_method,
                prop_list, use_space_group = False, tol=0.01):
     df = pd.read_csv(input_file)
 
-    unordered_results = p_umap(
-        process_one,
-        [df.iloc[idx] for idx in range(len(df))],
-        [niggli] * len(df),
-        [primitive] * len(df),
-        [graph_method] * len(df),
-        [prop_list] * len(df),
-        [use_space_group] * len(df),
-        [tol] * len(df),
-        num_cpus=num_workers)
+    rows = [df.iloc[idx] for idx in range(len(df))]
+    if num_workers <= 1:
+        unordered_results = [
+            process_one(row, niggli, primitive, graph_method, prop_list,
+                        use_space_group, tol)
+            for row in rows
+        ]
+    else:
+        unordered_results = p_umap(
+            process_one,
+            rows,
+            [niggli] * len(df),
+            [primitive] * len(df),
+            [graph_method] * len(df),
+            [prop_list] * len(df),
+            [use_space_group] * len(df),
+            [tol] * len(df),
+            num_cpus=num_workers)
 
     mpid_to_results = {result['mp_id']: result for result in unordered_results}
     ordered_results = [mpid_to_results[df.iloc[idx]['material_id']]
@@ -1216,15 +1219,10 @@ def preprocess_tensors(crystal_array_list, niggli, primitive, graph_method):
         }
         return result_dict
 
-    unordered_results = p_umap(
-        process_one,
-        list(range(len(crystal_array_list))),
-        crystal_array_list,
-        [niggli] * len(crystal_array_list),
-        [primitive] * len(crystal_array_list),
-        [graph_method] * len(crystal_array_list),
-        num_cpus=30,
-    )
+    unordered_results = [
+        process_one(batch_idx, crystal_array, niggli, primitive, graph_method)
+        for batch_idx, crystal_array in enumerate(crystal_array_list)
+    ]
     ordered_results = list(
         sorted(unordered_results, key=lambda x: x['batch_idx']))
     return ordered_results

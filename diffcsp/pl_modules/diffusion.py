@@ -14,7 +14,6 @@ import omegaconf
 import pytorch_lightning as pl
 from torch_scatter import scatter
 from torch_scatter.composite import scatter_softmax
-from torch_geometric.utils import to_dense_adj, dense_to_sparse
 from tqdm import tqdm
 
 from diffcsp.common.utils import PROJECT_ROOT
@@ -70,6 +69,7 @@ class CSPDiffusion(BaseModule):
         super().__init__(*args, **kwargs)
         
         self.decoder = hydra.utils.instantiate(self.hparams.decoder, latent_dim = self.hparams.latent_dim + self.hparams.time_dim, _recursive_=False)
+
         self.beta_scheduler = hydra.utils.instantiate(self.hparams.beta_scheduler)
         self.sigma_scheduler = hydra.utils.instantiate(self.hparams.sigma_scheduler)
         self.time_dim = self.hparams.time_dim
@@ -79,44 +79,62 @@ class CSPDiffusion(BaseModule):
 
     def forward(self, batch):
 
-        batch_size = batch.num_graphs
-        times = self.beta_scheduler.uniform_sample_t(batch_size, self.device)
-        time_emb = self.time_embedding(times)
+        # ===== 1. 采样扩散时间步 =====
+        # batch 是 PyG 的 Batch 对象: B 个晶体拼成的"大图"。
+        # 约定形状: B = 晶体数(=batch_size), N = 总原子数, E = 总边数。
+        batch_size = batch.num_graphs                                                      # 标量 B
+        times = self.beta_scheduler.uniform_sample_t(batch_size, self.device)             # (B,) 每个晶体随机抽一个时间步 t
+        time_emb = self.time_embedding(times)                                             # (B, time_dim) 时间步正弦嵌入
 
-        alphas_cumprod = self.beta_scheduler.alphas_cumprod[times]
-        beta = self.beta_scheduler.betas[times]
+        # ===== 2. 取出时间步对应的噪声调度系数 =====
+        alphas_cumprod = self.beta_scheduler.alphas_cumprod[times]                        # (B,) 晶格 DDPM 的 α̅_t
+        beta = self.beta_scheduler.betas[times]                                           # (B,) 晶格 β_t (训练阶段未真正用到)
 
-        c0 = torch.sqrt(alphas_cumprod)
-        c1 = torch.sqrt(1. - alphas_cumprod)
+        c0 = torch.sqrt(alphas_cumprod)                                                   # (B,) DDPM 前向: 信号系数 √α̅_t
+        c1 = torch.sqrt(1. - alphas_cumprod)                                              # (B,) DDPM 前向: 噪声系数 √(1-α̅_t)
 
-        sigmas = self.sigma_scheduler.sigmas[times]
-        sigmas_norm = self.sigma_scheduler.sigmas_norm[times]
+        sigmas = self.sigma_scheduler.sigmas[times]                                       # (B,) 坐标 SDE 的噪声尺度 σ_t
+        sigmas_norm = self.sigma_scheduler.sigmas_norm[times]                             # (B,) 归一化 σ (用于尺度对齐)
 
-        lattices = lattice_params_to_matrix_torch(batch.lengths, batch.angles)
-        frac_coords = batch.frac_coords
+        # ===== 3. 准备晶格矩阵与分数坐标 =====
+        # batch.lengths / batch.angles: (B, 3) → 每行[a,b,c] / [α,β,γ]
+        lattices = lattice_params_to_matrix_torch(batch.lengths, batch.angles)            # (B, 3, 3) 晶格矩阵(行向量为晶格基矢)
+        frac_coords = batch.frac_coords                                                   # (N, 3) 全部原子的分数坐标(已拼接)
 
-        rand_l, rand_x = torch.randn_like(lattices), torch.randn_like(frac_coords)
+        rand_l, rand_x = torch.randn_like(lattices), torch.randn_like(frac_coords)        # (B,3,3) / (N,3) 标准高斯噪声 ε_l, ε_x
 
-        input_lattice = c0[:, None, None] * lattices + c1[:, None, None] * rand_l
-        sigmas_per_atom = sigmas.repeat_interleave(batch.num_atoms)[:, None]
-        sigmas_norm_per_atom = sigmas_norm.repeat_interleave(batch.num_atoms)[:, None]
-        input_frac_coords = (frac_coords + sigmas_per_atom * rand_x) % 1.
+        # ===== 4. 对晶格和分数坐标分别加噪 =====
+        # (c0/c1 用 [:,None,None] 升维到 (B,1,1) 以便 broadcast 到 (B,3,3))
+        input_lattice = c0[:, None, None] * lattices + c1[:, None, None] * rand_l         # (B,3,3) 晶格走 DDPM 线性插值加噪
+        sigmas_per_atom = sigmas.repeat_interleave(batch.num_atoms)[:, None]              # (N,1) 把图级 σ_t 按原子数广播到每个原子
+        sigmas_norm_per_atom = sigmas_norm.repeat_interleave(batch.num_atoms)[:, None]    # (N,1) 同上(归一化 σ)
+        input_frac_coords = (frac_coords + sigmas_per_atom * rand_x) % 1.                 # (N,3) 坐标加噪; %1. 做周期边界 wrap
 
 
+        # ===== 5. 条件/消融开关: 对应模态 cost 为 0 时不参与扩散, 保持原始值 =====
         if self.keep_coords:
-            input_frac_coords = frac_coords
-
+            input_frac_coords = frac_coords                                               # 坐标不扩散
         if self.keep_lattice:
-            input_lattice = lattices
+            input_lattice = lattices                                                      # 晶格不扩散
 
+        # ===== 6. 网络前向: 预测噪声/得分 =====
+        # decoder = CSPNet(等变GNN)。输入:
+        #   atom_types (N,), input_frac_coords (N,3), input_lattice (B,3,3),
+        #   num_atoms (B,), batch.batch (N,) 节点→图映射
+        # 输出: pred_l (B,3,3) 晶格噪声估计, pred_x (N,3) 坐标得分估计
+        # 原 CSPNet 调用（保留备查）
+        # pred_l, pred_x = self.decoder(time_emb, batch.atom_types, input_frac_coords, input_lattice, batch.num_atoms, batch.batch)
+        # 新：self.decoder 已替换为 EquiformerCSPDecoder（接口一致，参数不变）
         pred_l, pred_x = self.decoder(time_emb, batch.atom_types, input_frac_coords, input_lattice, batch.num_atoms, batch.batch)
 
-        tar_x = d_log_p_wrapped_normal(sigmas_per_atom * rand_x, sigmas_per_atom) / torch.sqrt(sigmas_norm_per_atom)
+        # ===== 7. 计算目标与损失 =====
+        # 坐标目标 tar_x: 环形空间 wrapped normal 分布的得分(对数密度梯度) ∇log p(x), 再除 √σ_norm 归一化
+        tar_x = d_log_p_wrapped_normal(sigmas_per_atom * rand_x, sigmas_per_atom) / torch.sqrt(sigmas_norm_per_atom)   # (N,3)
 
-        loss_lattice = F.mse_loss(pred_l, rand_l)
-        loss_coord = F.mse_loss(pred_x, tar_x)
+        loss_lattice = F.mse_loss(pred_l, rand_l)                                         # 晶格: 直接回归噪声 ε_l (DDPM)
+        loss_coord = F.mse_loss(pred_x, tar_x)                                            # 坐标: 得分匹配(score matching)
 
-        loss = (
+        loss = (                                                                          # 加权总损失(标量)
             self.hparams.cost_lattice * loss_lattice +
             self.hparams.cost_coord * loss_coord)
 
@@ -293,4 +311,3 @@ class CSPDiffusion(BaseModule):
 
         return log_dict, loss
 
-    

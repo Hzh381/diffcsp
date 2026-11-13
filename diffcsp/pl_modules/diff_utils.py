@@ -86,7 +86,7 @@ class BetaScheduler(nn.Module):
 
     def uniform_sample_t(self, batch_size, device):
         ts = np.random.choice(np.arange(1, self.timesteps+1), batch_size)
-        return torch.from_numpy(ts).to(device)
+        return torch.from_numpy(ts).to(device).long()
 
 class SigmaScheduler(nn.Module):
 
@@ -109,6 +109,6 @@ class SigmaScheduler(nn.Module):
 
     def uniform_sample_t(self, batch_size, device):
         ts = np.random.choice(np.arange(1, self.timesteps+1), batch_size)
-        return torch.from_numpy(ts).to(device)
+        return torch.from_numpy(ts).to(device).long()
 
 

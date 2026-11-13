@@ -1,0 +1,33 @@
+_target_: diffcsp.pl_modules.equiformer_v3.decoder.EquiformerV3CSPDecoder
+
+# The decoder is instantiated with latent_dim = time_dim + model latent_dim.
+hidden_dim: 96
+num_layers: 4
+max_atoms: 100
+lmax: 2
+mmax: 2
+attn_hidden_channels: 48
+num_heads: 4
+attn_alpha_channels: 16
+attn_value_channels: 8
+ffn_hidden_channels: 192
+edge_channels: 64
+num_radial_basis: 32
+cutoff: ${model.radius}
+max_neighbors: ${model.max_neighbors}
+avg_degree: 20.
+attn_grid_resolution_list: [6, 8]
+ffn_grid_resolution_list: [8, 8]
+norm_type: merge_layer_norm
+attn_activation: sep-merge_gates2_swiglu
+ffn_activation: sep-merge_gates2_swiglu
+use_envelope: true
+use_grid_mlp: true
+use_attn_renorm: true
+use_add_merge: false
+use_rad_l_parametrization: true
+softcap: null
+attn_eps: 1e-16
+drop_path_rate: 0.0
+proj_drop: 0.0
+ffn_drop: 0.0
